@@ -9,6 +9,7 @@ import {
   ticketUrl,
 } from '../api/freshdesk'
 import type { Conversation, EnrichedTicket } from '../api/types'
+import { EXPORT_KEYWORDS_LABEL } from './exportSanitize'
 
 function formatConversationSection(
   ticket: EnrichedTicket,
@@ -48,7 +49,7 @@ export function buildTicketsMarkdown(
   userNames: Map<number, string>,
 ): string {
   const lines: string[] = [
-    `# Tickets created ${from} to ${to} (${tickets.length})`,
+    `# Tickets created ${from} to ${to} (${tickets.length} matching ${EXPORT_KEYWORDS_LABEL})`,
     '',
   ]
 
@@ -67,15 +68,24 @@ export function buildTicketsMarkdown(
     lines.push(`- Due: ${formatUtcDateTime(ticket.due_by)}`)
     lines.push('')
     lines.push(...formatConversationSection(ticket, conversations, userNames))
-    lines.push('---')
+    lines.push(`## End [#${ticket.id}]`)
     lines.push('')
   }
 
   return lines.join('\n').trimEnd() + '\n'
 }
 
+export function collapseConsecutiveBlankLines(text: string): string {
+  return text
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[^\S\n]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+}
+
 export function downloadMarkdown(content: string, filename: string): void {
-  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
+  const normalized = collapseConsecutiveBlankLines(content)
+  const blob = new Blob([normalized], { type: 'text/markdown;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const anchor = document.createElement('a')
   anchor.href = url

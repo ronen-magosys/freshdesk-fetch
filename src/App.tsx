@@ -30,6 +30,11 @@ import {
   type EnrichedTicket,
   type FetchProgress,
 } from './api/types'
+import {
+  buildExportSuccessMessage,
+  buildNoMatchesMarkdown,
+  prepareExportForDownload,
+} from './utils/exportSanitize'
 import { buildTicketsMarkdown, downloadMarkdown } from './utils/markdown'
 
 const GlobalStyle = styled.div`
@@ -864,6 +869,7 @@ function App() {
   const [downloading, setDownloading] = useState(false)
   const [progress, setProgress] = useState<FetchProgress | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [exportSuccess, setExportSuccess] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [downloadChoice, setDownloadChoice] = useState<DownloadChoiceState | null>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -968,6 +974,7 @@ function App() {
 
       setLoading(true)
       setError(null)
+      setExportSuccess(null)
       setProgress(null)
       setSelectedTicket(null)
       setConversationsLoading(false)
@@ -1032,6 +1039,7 @@ function App() {
 
     setLoading(true)
     setError(null)
+    setExportSuccess(null)
     setProgress(null)
     setTickets([])
     setTotalTickets(0)
@@ -1068,6 +1076,7 @@ function App() {
 
   const handleFetch = useCallback(() => {
     setError(null)
+    setExportSuccess(null)
 
     try {
       validateDateRange(fromDate, toDate)
@@ -1132,6 +1141,7 @@ function App() {
 
       setDownloading(true)
       setError(null)
+      setExportSuccess(null)
       setProgress(null)
 
       let ticketsToExport = tickets
@@ -1155,16 +1165,27 @@ function App() {
 
         const finishDownload = async () => {
           await fetchConversationsForTickets(ticketsToExport, nextCache)
-          const markdown = buildTicketsMarkdown(
+          const prepared = prepareExportForDownload(
             ticketsToExport,
-            fromDate,
-            toDate,
-            domain,
             nextCache,
             exportUserNames,
           )
+          const markdown =
+            prepared.matchedCount === 0
+              ? buildNoMatchesMarkdown(fromDate, toDate, prepared.totalCount)
+              : buildTicketsMarkdown(
+                  prepared.tickets,
+                  fromDate,
+                  toDate,
+                  domain,
+                  prepared.conversationsByTicketId,
+                  prepared.userNames,
+                )
           const suffix = scope === 'page' ? `page-${currentPage}` : 'all'
           downloadMarkdown(markdown, `tickets-${fromDate}-to-${toDate}-${suffix}.md`)
+          setExportSuccess(
+            buildExportSuccessMessage(prepared.matchedCount, prepared.totalCount),
+          )
           setProgress(null)
         }
 
@@ -1237,7 +1258,7 @@ function App() {
   const statusTone = error ? 'error' : progress?.status === 'rate_limited' ? 'warn' : 'info'
   const statusText =
     error ??
-    (loading || downloading ? progressMessage(progress) : null)
+    (loading || downloading ? progressMessage(progress) : exportSuccess)
   const isBusy = loading || downloading
   const hasLoadedTickets = totalTickets > 0
   const showTableLoading = loading && !downloading && tickets.length > 0
