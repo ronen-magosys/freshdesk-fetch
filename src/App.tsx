@@ -6,6 +6,7 @@ import {
   defaultDateRange,
   fetchAllTicketsInRange,
   fetchAppConfig,
+  fetchFreshdeskTags,
   fetchTicketConversations,
   fetchTicketPage,
   formatUtcDateTime,
@@ -17,8 +18,9 @@ import {
   PRIORITY_LABELS,
   STATUS_LABELS,
   ticketUrl,
+  type TicketFetchFilters,
   UI_PAGE_SIZE,
-  validateDateRange,
+  validateFetchFilters,
   WARN_CONVERSATIONS_DOWNLOAD,
   WARN_DATE_RANGE_DAYS,
   WARN_TICKETS,
@@ -30,12 +32,14 @@ import {
   type EnrichedTicket,
   type FetchProgress,
 } from './api/types'
+import { ChipSelect } from './components/ChipSelect'
 import {
   buildExportSuccessMessage,
   buildNoMatchesMarkdown,
   prepareExportForDownload,
 } from './utils/exportSanitize'
 import { buildTicketsMarkdown, downloadMarkdown } from './utils/markdown'
+import { DEFAULT_KEYWORDS } from './utils/filters'
 
 const GlobalStyle = styled.div`
   min-height: 100vh;
@@ -136,6 +140,52 @@ const Button = styled.button<{ $variant?: 'primary' | 'secondary' }>`
   &:disabled {
     opacity: 0.55;
     cursor: not-allowed;
+  }
+`
+
+const TooltipWrap = styled.span`
+  position: relative;
+  display: inline-flex;
+
+  &:hover > [data-tooltip-bubble],
+  &:focus-within > [data-tooltip-bubble] {
+    opacity: 1;
+    visibility: visible;
+  }
+`
+
+const TooltipBubble = styled.span`
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 8px);
+  transform: translateX(-50%);
+  background: #183247;
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 500;
+  line-height: 1.35;
+  padding: 6px 10px;
+  border-radius: 4px;
+  max-width: 240px;
+  width: max-content;
+  text-align: center;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 0.12s ease,
+    visibility 0.12s ease;
+  z-index: 20;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+
+  &::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    bottom: 100%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-bottom-color: #183247;
   }
 `
 
@@ -615,6 +665,20 @@ function pageRangeLabel(currentPage: number, totalTickets: number): string {
   return `${start}–${end} of ${totalTickets}`
 }
 
+function buildTicketFetchFilters(
+  from: string,
+  to: string,
+  tags: string[],
+  keywords: string[],
+): TicketFetchFilters {
+  return {
+    from,
+    to,
+    tags,
+    keywords,
+  }
+}
+
 function ConfirmDialog({
   title,
   message,
@@ -692,7 +756,7 @@ function DownloadChoiceDialog({
       >
         <DialogHeader>
           <DialogHeaderContent>
-            <DialogTitle id="download-choice-title">Download markdown</DialogTitle>
+            <DialogTitle id="download-choice-title">Download tickets</DialogTitle>
           </DialogHeaderContent>
         </DialogHeader>
         <ConfirmBody>Which tickets should be included in the export?</ConfirmBody>
@@ -852,6 +916,11 @@ function App() {
   const defaults = defaultDateRange()
   const [fromDate, setFromDate] = useState(defaults.from)
   const [toDate, setToDate] = useState(defaults.to)
+  const [selectedTags, setSelectedTags] = useState<string[]>([])
+  const [keywords, setKeywords] = useState<string[]>([...DEFAULT_KEYWORDS])
+  const [availableTags, setAvailableTags] = useState<string[]>([])
+  const [tagsLoading, setTagsLoading] = useState(false)
+  const [hasFetched, setHasFetched] = useState(false)
   const [domain, setDomain] = useState('')
   const [tickets, setTickets] = useState<EnrichedTicket[]>([])
   const [currentPage, setCurrentPage] = useState(1)
@@ -892,6 +961,24 @@ function App() {
         setError(message)
       })
   }, [])
+
+  const loadAvailableTags = useCallback(() => {
+    setTagsLoading(true)
+
+    void fetchFreshdeskTags()
+      .then((tags) => {
+        setAvailableTags(tags)
+        setTagsLoading(false)
+      })
+      .catch(() => {
+        setAvailableTags([])
+        setTagsLoading(false)
+      })
+  }, [])
+
+  useEffect(() => {
+    loadAvailableTags()
+  }, [loadAvailableTags])
 
   const filteredTickets = useMemo(() => {
     const query = search.trim().toLowerCase()
@@ -972,6 +1059,8 @@ function App() {
       const controller = new AbortController()
       abortRef.current = controller
 
+      const filters = buildTicketFetchFilters(fromDate, toDate, selectedTags, keywords)
+
       setLoading(true)
       setError(null)
       setExportSuccess(null)
@@ -982,8 +1071,7 @@ function App() {
 
       try {
         const result = await fetchTicketPage(
-          fromDate,
-          toDate,
+          filters,
           page,
           cachesRef.current,
           setProgress,
@@ -996,6 +1084,7 @@ function App() {
         setUserNames(result.userNames)
         setSearch('')
         setProgress(null)
+        setHasFetched(true)
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return
         const message =
@@ -1009,15 +1098,25 @@ function App() {
         setLoading(false)
       }
     },
-    [fromDate, toDate],
+    [fromDate, keywords, selectedTags, toDate],
   )
 
   const startFetchAfterPreview = useCallback(
-    async (previewTotal: number, previewTotalPages: number) => {
+    async (
+      filters: TicketFetchFilters,
+      previewTotal: number,
+      previewTotalPages: number,
+    ) => {
+      const hasKeywords = filters.keywords.length > 0
+
       if (previewTotal > WARN_TICKETS) {
+        const message = hasKeywords
+          ? `This range has ${previewTotal} tickets (${previewTotalPages} pages). Keywords require loading all ${previewTotalPages} pages before filtering. Continue?`
+          : `This range has ${previewTotal} tickets (${previewTotalPages} pages). Only the first ${UI_PAGE_SIZE} will load now.`
+
         setConfirm({
           title: 'Large result set',
-          message: `This range has ${previewTotal} tickets (${previewTotalPages} pages). Only the first ${UI_PAGE_SIZE} will load now.`,
+          message,
           onConfirm: () => {
             setConfirm(null)
             void loadPage(1)
@@ -1037,6 +1136,8 @@ function App() {
     const controller = new AbortController()
     abortRef.current = controller
 
+    const filters = buildTicketFetchFilters(fromDate, toDate, selectedTags, keywords)
+
     setLoading(true)
     setError(null)
     setExportSuccess(null)
@@ -1048,19 +1149,17 @@ function App() {
     setUserNames(new Map())
     setConversationsCache(new Map())
     cachesRef.current = createTicketFetchCaches()
+    setHasFetched(false)
     setSelectedTicket(null)
     setConversationsLoading(false)
     setConversationsError(null)
 
     try {
-      const preview = await previewTicketSearch(
-        fromDate,
-        toDate,
-        cachesRef.current,
-        { signal: controller.signal },
-      )
+      const preview = await previewTicketSearch(filters, cachesRef.current, {
+        signal: controller.signal,
+      })
       setLoading(false)
-      await startFetchAfterPreview(preview.total, preview.totalPages)
+      await startFetchAfterPreview(filters, preview.total, preview.totalPages)
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return
       const message =
@@ -1072,21 +1171,23 @@ function App() {
       setError(message)
       setLoading(false)
     }
-  }, [fromDate, toDate, startFetchAfterPreview])
+  }, [fromDate, keywords, startFetchAfterPreview, selectedTags, toDate])
 
   const handleFetch = useCallback(() => {
     setError(null)
     setExportSuccess(null)
 
+    const filters = buildTicketFetchFilters(fromDate, toDate, selectedTags, keywords)
+
     try {
-      validateDateRange(fromDate, toDate)
+      validateFetchFilters(filters)
     } catch (err) {
       const message =
         err instanceof FreshdeskApiError
           ? err.message
           : err instanceof Error
             ? err.message
-            : 'Invalid date range.'
+            : 'Invalid fetch filters.'
       setError(message)
       return
     }
@@ -1106,7 +1207,7 @@ function App() {
     }
 
     void runFetchWithPreview()
-  }, [fromDate, toDate, runFetchWithPreview])
+  }, [fromDate, keywords, runFetchWithPreview, selectedTags, toDate])
 
   const fetchConversationsForTickets = useCallback(
     async (
@@ -1139,6 +1240,9 @@ function App() {
     async (scope: 'page' | 'range') => {
       if (!domain) return
 
+      const filters = buildTicketFetchFilters(fromDate, toDate, selectedTags, keywords)
+      const exportKeywords = filters.keywords
+
       setDownloading(true)
       setError(null)
       setExportSuccess(null)
@@ -1151,8 +1255,7 @@ function App() {
       try {
         if (scope === 'range') {
           const result = await fetchAllTicketsInRange(
-            fromDate,
-            toDate,
+            filters,
             cachesRef.current,
             setProgress,
           )
@@ -1169,10 +1272,16 @@ function App() {
             ticketsToExport,
             nextCache,
             exportUserNames,
+            exportKeywords,
           )
           const markdown =
-            prepared.matchedCount === 0
-              ? buildNoMatchesMarkdown(fromDate, toDate, prepared.totalCount)
+            prepared.matchedCount === 0 && exportKeywords.length > 0
+              ? buildNoMatchesMarkdown(
+                  fromDate,
+                  toDate,
+                  prepared.totalCount,
+                  exportKeywords,
+                )
               : buildTicketsMarkdown(
                   prepared.tickets,
                   fromDate,
@@ -1180,11 +1289,16 @@ function App() {
                   domain,
                   prepared.conversationsByTicketId,
                   prepared.userNames,
+                  exportKeywords,
                 )
           const suffix = scope === 'page' ? `page-${currentPage}` : 'all'
           downloadMarkdown(markdown, `tickets-${fromDate}-to-${toDate}-${suffix}.md`)
           setExportSuccess(
-            buildExportSuccessMessage(prepared.matchedCount, prepared.totalCount),
+            buildExportSuccessMessage(
+              prepared.matchedCount,
+              prepared.totalCount,
+              exportKeywords,
+            ),
           )
           setProgress(null)
         }
@@ -1233,6 +1347,8 @@ function App() {
       domain,
       fetchConversationsForTickets,
       fromDate,
+      keywords,
+      selectedTags,
       tickets,
       toDate,
       userNames,
@@ -1260,6 +1376,14 @@ function App() {
     error ??
     (loading || downloading ? progressMessage(progress) : exportSuccess)
   const isBusy = loading || downloading
+  const downloadDisabledReason = downloading
+    ? 'A download is already in progress.'
+    : loading
+      ? 'Wait until tickets finish fetching.'
+      : tickets.length === 0
+        ? 'No tickets to download. Fetch tickets first.'
+        : undefined
+  const tagsUnavailable = !tagsLoading && availableTags.length === 0
   const hasLoadedTickets = totalTickets > 0
   const showTableLoading = loading && !downloading && tickets.length > 0
 
@@ -1327,17 +1451,49 @@ function App() {
               disabled={isBusy}
             />
           </Field>
+          <Field>
+            Tags
+            <ChipSelect
+              values={selectedTags}
+              onChange={setSelectedTags}
+              options={availableTags}
+              allowCustom={false}
+              placeholder={tagsUnavailable ? 'No tags found' : 'Select tags'}
+              disabled={isBusy || tagsUnavailable}
+              loading={tagsLoading}
+            />
+          </Field>
+          <Field>
+            Keywords
+            <ChipSelect
+              values={keywords}
+              onChange={setKeywords}
+              allowCustom
+              placeholder="Type keyword and press Enter"
+              disabled={isBusy}
+            />
+          </Field>
           <Button type="button" onClick={handleFetch} disabled={isBusy || !domain}>
             {loading ? 'Fetching…' : 'Fetch tickets'}
           </Button>
-          <Button
-            type="button"
-            $variant="secondary"
-            onClick={handleDownloadClick}
-            disabled={isBusy || tickets.length === 0}
-          >
-            {downloading ? 'Preparing download…' : 'Download markdown'}
-          </Button>
+          <TooltipWrap>
+            <Button
+              type="button"
+              $variant="secondary"
+              onClick={handleDownloadClick}
+              disabled={Boolean(downloadDisabledReason)}
+              aria-describedby={
+                downloadDisabledReason ? 'download-markdown-tooltip' : undefined
+              }
+            >
+              {downloading ? 'Preparing download…' : 'Download tickets'}
+            </Button>
+            {downloadDisabledReason ? (
+              <TooltipBubble id="download-markdown-tooltip" role="tooltip" data-tooltip-bubble>
+                {downloadDisabledReason}
+              </TooltipBubble>
+            ) : null}
+          </TooltipWrap>
         </Toolbar>
 
         {statusText ? <StatusBar $tone={statusTone}>{statusText}</StatusBar> : null}
@@ -1365,7 +1521,9 @@ function App() {
                 ? 'Fetching tickets from Freshdesk…'
                 : downloading
                   ? 'Loading conversations for markdown export…'
-                  : 'Choose a date range and click Fetch tickets.'}
+                  : !hasFetched
+                    ? 'Choose a date range and click Fetch tickets.'
+                    : 'No tickets matched the current filters.'}
             </EmptyState>
           ) : (
             <>

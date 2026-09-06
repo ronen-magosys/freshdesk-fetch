@@ -4,15 +4,13 @@ import {
   getTicketDescription,
 } from '../api/freshdesk'
 import type { Conversation, EnrichedTicket } from '../api/types'
+import {
+  buildKeywordsLabel,
+  textsMatchKeywords,
+} from './filters'
 
-export const EXPORT_KEYWORDS = ['sdk', 'api', 'integration'] as const
-
-export const EXPORT_KEYWORDS_LABEL = 'SDK/API/integration'
-
-const KEYWORD_PATTERN = new RegExp(
-  `\\b(?:${EXPORT_KEYWORDS.join('|')})\\b`,
-  'i',
-)
+export { DEFAULT_KEYWORDS, DEFAULT_KEYWORDS_INPUT } from './filters'
+export { buildKeywordsLabel } from './filters'
 
 const EMAIL_PATTERN =
   /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g
@@ -53,8 +51,19 @@ interface NameReplacement {
   replacement: string
 }
 
-function containsExportKeyword(text: string): boolean {
-  return KEYWORD_PATTERN.test(text)
+function ticketMatchesKeywordsForExport(
+  ticket: EnrichedTicket,
+  conversations: Conversation[],
+  keywords: string[],
+): boolean {
+  if (keywords.length === 0) return true
+  const texts = [
+    ticket.subject,
+    getTicketDescription(ticket),
+    ...conversations.map((conversation) => getConversationBody(conversation)),
+  ]
+
+  return textsMatchKeywords(texts, keywords)
 }
 
 function isPlaceholderName(name: string): boolean {
@@ -150,19 +159,6 @@ function collectNameReplacements(
   return replacements
 }
 
-export function ticketMatchesExportKeywords(
-  ticket: EnrichedTicket,
-  conversations: Conversation[],
-): boolean {
-  const texts = [
-    ticket.subject,
-    getTicketDescription(ticket),
-    ...conversations.map((conversation) => getConversationBody(conversation)),
-  ]
-
-  return texts.some((text) => containsExportKeyword(text))
-}
-
 function cloneConversation(
   conversation: Conversation,
   redactedBody: string,
@@ -227,6 +223,7 @@ export function prepareExportForDownload(
   tickets: EnrichedTicket[],
   conversationsByTicketId: Map<number, Conversation[]>,
   userNames: Map<number, string>,
+  keywords: string[],
 ): ExportPrepareResult {
   const totalCount = tickets.length
   const matchedTickets: EnrichedTicket[] = []
@@ -235,7 +232,7 @@ export function prepareExportForDownload(
 
   for (const ticket of tickets) {
     const conversations = conversationsByTicketId.get(ticket.id) ?? []
-    if (!ticketMatchesExportKeywords(ticket, conversations)) continue
+    if (!ticketMatchesKeywordsForExport(ticket, conversations, keywords)) continue
 
     const redacted = cloneRedactedTicket(ticket, conversations, userNames)
     matchedTickets.push(redacted.ticket)
@@ -252,17 +249,31 @@ export function prepareExportForDownload(
   }
 }
 
-export function buildNoMatchesMarkdown(from: string, to: string, totalCount: number): string {
+export function buildNoMatchesMarkdown(
+  from: string,
+  to: string,
+  totalCount: number,
+  keywords: string[],
+): string {
+  const label = buildKeywordsLabel(keywords)
   return [
-    `# Tickets created ${from} to ${to} (0 matching ${EXPORT_KEYWORDS_LABEL})`,
+    `# Tickets created ${from} to ${to} (0 matching ${label})`,
     '',
-    `No tickets in this export matched the keywords: ${EXPORT_KEYWORDS.join(', ')}.`,
+    `No tickets in this export matched the keywords: ${keywords.join(', ')}.`,
     '',
     `Total tickets in scope: ${totalCount}`,
     '',
   ].join('\n')
 }
 
-export function buildExportSuccessMessage(matchedCount: number, totalCount: number): string {
-  return `Exported ${matchedCount} of ${totalCount} tickets matching ${EXPORT_KEYWORDS_LABEL} (PII redacted).`
+export function buildExportSuccessMessage(
+  matchedCount: number,
+  totalCount: number,
+  keywords: string[],
+): string {
+  if (keywords.length === 0) {
+    return `Exported ${matchedCount} tickets (PII redacted).`
+  }
+  const label = buildKeywordsLabel(keywords)
+  return `Exported ${matchedCount} of ${totalCount} tickets matching ${label} (PII redacted).`
 }

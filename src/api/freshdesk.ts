@@ -1,3 +1,4 @@
+import { textsMatchKeywords } from '../utils/filters'
 import {
   type Agent,
   type Contact,
@@ -8,6 +9,15 @@ import {
   type SearchTicketsResponse,
   type Ticket,
 } from './types'
+
+export interface TicketFetchFilters {
+  from: string
+  to: string
+  tags: string[]
+  keywords: string[]
+}
+
+const MAX_SEARCH_QUERY_LENGTH = 512
 
 export const UI_PAGE_SIZE = 30
 export const MAX_SEARCH_PAGES = 10
@@ -40,6 +50,9 @@ export interface TicketFetchCaches {
   contacts: Map<number, string>
   searchPages: Map<number, Ticket[]>
   searchTotal: number | null
+  filteredTickets: EnrichedTicket[] | null
+  filteredUserNames: Map<number, string> | null
+  filters: TicketFetchFilters | null
 }
 
 export function createTicketFetchCaches(): TicketFetchCaches {
@@ -48,6 +61,9 @@ export function createTicketFetchCaches(): TicketFetchCaches {
     contacts: new Map(),
     searchPages: new Map(),
     searchTotal: null,
+    filteredTickets: null,
+    filteredUserNames: null,
+    filters: null,
   }
 }
 
@@ -230,9 +246,52 @@ function dayBefore(dateStr: string): string {
   return formatDateForQuery(date)
 }
 
-function buildCreatedAtQuery(from: string, to: string): string {
+function validateTagValue(tag: string): void {
+  if (/['"]/.test(tag)) {
+    throw new FreshdeskApiError(
+      `Tag "${tag}" contains invalid characters (quotes are not allowed).`,
+      400,
+    )
+  }
+}
+
+function buildTagClause(tags: string[]): string {
+  if (tags.length === 0) return ''
+  for (const tag of tags) validateTagValue(tag)
+  if (tags.length === 1) return `tag:'${tags[0]}'`
+  const parts = tags.map((tag) => `tag:'${tag}'`)
+  return `(${parts.join(' OR ')})`
+}
+
+function buildSearchQuery(from: string, to: string, tags: string[]): string {
   const fromExclusive = dayBefore(from)
-  return `"created_at:>'${fromExclusive}' AND created_at:<'${to}'"`
+  let inner = `created_at:>'${fromExclusive}' AND created_at:<'${to}'`
+  const tagClause = buildTagClause(tags)
+  if (tagClause) inner += ` AND ${tagClause}`
+  const query = `"${inner}"`
+  if (query.length > MAX_SEARCH_QUERY_LENGTH) {
+    throw new FreshdeskApiError(
+      `Search query is ${query.length} characters; Freshdesk allows at most ${MAX_SEARCH_QUERY_LENGTH}. Use fewer or shorter tags.`,
+      400,
+    )
+  }
+  return query
+}
+
+function filtersMatch(a: TicketFetchFilters | null, b: TicketFetchFilters): boolean {
+  if (!a) return false
+  return (
+    a.from === b.from &&
+    a.to === b.to &&
+    a.tags.length === b.tags.length &&
+    a.keywords.length === b.keywords.length &&
+    a.tags.every((tag, index) => tag === b.tags[index]) &&
+    a.keywords.every((keyword, index) => keyword === b.keywords[index])
+  )
+}
+
+function computeLocalTotalPages(total: number): number {
+  return Math.max(Math.ceil(total / UI_PAGE_SIZE), 1)
 }
 
 function compareDates(a: string, b: string): number {
@@ -260,6 +319,11 @@ export function validateDateRange(from: string, to: string): void {
   }
 }
 
+export function validateFetchFilters(filters: TicketFetchFilters): void {
+  validateDateRange(filters.from, filters.to)
+  buildSearchQuery(filters.from, filters.to, filters.tags)
+}
+
 export function computeTotalPages(total: number): number {
   return Math.min(Math.max(Math.ceil(total / UI_PAGE_SIZE), 1), MAX_SEARCH_PAGES)
 }
@@ -274,12 +338,11 @@ function assertTicketTotalWithinLimit(total: number): void {
 }
 
 async function searchTicketsPage(
-  from: string,
-  to: string,
+  filters: TicketFetchFilters,
   page: number,
   options: FreshdeskFetchOptions,
 ): Promise<SearchTicketsResponse> {
-  const query = encodeURIComponent(buildCreatedAtQuery(from, to))
+  const query = encodeURIComponent(buildSearchQuery(filters.from, filters.to, filters.tags))
   const { data } = await freshdeskFetch<SearchTicketsResponse>(
     `/api/v2/search/tickets?query=${query}&page=${page}`,
     options,
@@ -288,8 +351,7 @@ async function searchTicketsPage(
 }
 
 async function getSearchPageTickets(
-  from: string,
-  to: string,
+  filters: TicketFetchFilters,
   page: number,
   caches: TicketFetchCaches,
   options: FreshdeskFetchOptions,
@@ -297,9 +359,58 @@ async function getSearchPageTickets(
   const cached = caches.searchPages.get(page)
   if (cached) return cached
 
-  const pageData = await searchTicketsPage(from, to, page, options)
+  const pageData = await searchTicketsPage(filters, page, options)
   caches.searchPages.set(page, pageData.results)
   return pageData.results
+}
+
+async function loadAllSearchPageTickets(
+  filters: TicketFetchFilters,
+  caches: TicketFetchCaches,
+  options: FreshdeskFetchOptions,
+  onProgress: (progress: FetchProgress) => void,
+  apiTotal: number,
+  apiTotalPages: number,
+): Promise<Ticket[]> {
+  const allRawTickets: Ticket[] = []
+
+  for (let page = 1; page <= apiTotalPages; page += 1) {
+    onProgress({
+      fetched: allRawTickets.length,
+      total: apiTotal,
+      page,
+      totalPages: apiTotalPages,
+      phase: 'tickets',
+      status: 'fetching',
+      message: `Loading page ${page} of ${apiTotalPages}…`,
+    })
+    const pageTickets = await getSearchPageTickets(filters, page, caches, options)
+    allRawTickets.push(...pageTickets)
+  }
+
+  return allRawTickets
+}
+
+async function ensureSearchPreview(
+  filters: TicketFetchFilters,
+  caches: TicketFetchCaches,
+  options: FreshdeskFetchOptions,
+): Promise<{ total: number; totalPages: number }> {
+  if (caches.searchTotal !== null) {
+    return {
+      total: caches.searchTotal,
+      totalPages: computeTotalPages(caches.searchTotal),
+    }
+  }
+
+  const firstPage = await searchTicketsPage(filters, 1, options)
+  assertTicketTotalWithinLimit(firstPage.total)
+  caches.searchTotal = firstPage.total
+  caches.searchPages.set(1, firstPage.results)
+  return {
+    total: firstPage.total,
+    totalPages: computeTotalPages(firstPage.total),
+  }
 }
 
 async function fetchAllAgents(options: FreshdeskFetchOptions): Promise<Map<number, string>> {
@@ -451,12 +562,11 @@ async function enrichTickets(
 }
 
 export async function previewTicketSearch(
-  from: string,
-  to: string,
+  filters: TicketFetchFilters,
   caches: TicketFetchCaches,
   options: FreshdeskFetchOptions = {},
 ): Promise<SearchTicketsPreview> {
-  validateDateRange(from, to)
+  validateFetchFilters(filters)
 
   if (caches.searchTotal !== null) {
     return {
@@ -465,42 +575,118 @@ export async function previewTicketSearch(
     }
   }
 
-  const firstPage = await searchTicketsPage(from, to, 1, options)
-  assertTicketTotalWithinLimit(firstPage.total)
-  caches.searchTotal = firstPage.total
-  caches.searchPages.set(1, firstPage.results)
+  const preview = await ensureSearchPreview(filters, caches, options)
+  return preview
+}
+
+async function fetchFilteredTicketPage(
+  filters: TicketFetchFilters,
+  page: number,
+  caches: TicketFetchCaches,
+  fetchOptions: FreshdeskFetchOptions,
+  report: (progress: FetchProgress) => void,
+): Promise<FetchTicketPageResult> {
+  if (
+    caches.filteredTickets !== null &&
+    caches.filteredUserNames !== null &&
+    filtersMatch(caches.filters, filters)
+  ) {
+    const total = caches.filteredTickets.length
+    const totalPages = computeLocalTotalPages(total)
+    if (page < 1 || page > totalPages) {
+      throw new FreshdeskApiError(
+        `Page ${page} is out of range (1–${totalPages}).`,
+        400,
+      )
+    }
+
+    const start = (page - 1) * UI_PAGE_SIZE
+    const tickets = caches.filteredTickets.slice(start, start + UI_PAGE_SIZE)
+    return {
+      tickets,
+      total,
+      totalPages,
+      userNames: caches.filteredUserNames,
+    }
+  }
+
+  const { total: apiTotal, totalPages: apiTotalPages } = await ensureSearchPreview(
+    filters,
+    caches,
+    fetchOptions,
+  )
+
+  report({
+    fetched: 0,
+    total: apiTotal,
+    page: 1,
+    totalPages: apiTotalPages,
+    phase: 'tickets',
+    status: 'fetching',
+    message: `Loading all ${apiTotalPages} pages to apply keyword filter…`,
+  })
+
+  const allRawTickets = await loadAllSearchPageTickets(
+    filters,
+    caches,
+    fetchOptions,
+    report,
+    apiTotal,
+    apiTotalPages,
+  )
+
+  const filteredRaw = allRawTickets.filter((ticket) =>
+    textsMatchKeywords(
+      [ticket.subject, getTicketDescription(ticket)],
+      filters.keywords,
+    ),
+  )
+
+  const totalPages = computeLocalTotalPages(filteredRaw.length)
+  const { tickets, userNames } = await enrichTickets(
+    filteredRaw,
+    caches,
+    fetchOptions,
+    report,
+    { page: totalPages, totalPages, total: filteredRaw.length },
+  )
+
+  caches.filteredTickets = tickets
+  caches.filteredUserNames = userNames
+  caches.filters = { ...filters, tags: [...filters.tags], keywords: [...filters.keywords] }
+
+  if (page < 1 || page > totalPages) {
+    throw new FreshdeskApiError(
+      `Page ${page} is out of range (1–${totalPages}).`,
+      400,
+    )
+  }
+
+  const start = (page - 1) * UI_PAGE_SIZE
   return {
-    total: firstPage.total,
-    totalPages: computeTotalPages(firstPage.total),
+    tickets: tickets.slice(start, start + UI_PAGE_SIZE),
+    total: tickets.length,
+    totalPages,
+    userNames,
   }
 }
 
 export async function fetchTicketPage(
-  from: string,
-  to: string,
+  filters: TicketFetchFilters,
   page: number,
   caches: TicketFetchCaches,
   onProgress: (progress: FetchProgress) => void,
   options: FreshdeskFetchOptions = {},
 ): Promise<FetchTicketPageResult> {
-  validateDateRange(from, to)
+  validateFetchFilters(filters)
 
   const { fetchOptions, report } = createProgressReporter(onProgress, options)
 
-  let total: number
-  let totalPages: number
-
-  if (caches.searchTotal !== null) {
-    total = caches.searchTotal
-    totalPages = computeTotalPages(total)
-  } else {
-    const firstPage = await searchTicketsPage(from, to, 1, fetchOptions)
-    assertTicketTotalWithinLimit(firstPage.total)
-    total = firstPage.total
-    totalPages = computeTotalPages(total)
-    caches.searchTotal = total
-    caches.searchPages.set(1, firstPage.results)
+  if (filters.keywords.length > 0) {
+    return fetchFilteredTicketPage(filters, page, caches, fetchOptions, report)
   }
+
+  const { total, totalPages } = await ensureSearchPreview(filters, caches, fetchOptions)
 
   if (page < 1 || page > totalPages) {
     throw new FreshdeskApiError(
@@ -519,7 +705,7 @@ export async function fetchTicketPage(
     message: `Loading page ${page} of ${totalPages}…`,
   })
 
-  const rawTickets = await getSearchPageTickets(from, to, page, caches, fetchOptions)
+  const rawTickets = await getSearchPageTickets(filters, page, caches, fetchOptions)
   const { tickets, userNames } = await enrichTickets(
     rawTickets,
     caches,
@@ -532,40 +718,41 @@ export async function fetchTicketPage(
 }
 
 export async function fetchAllTicketsInRange(
-  from: string,
-  to: string,
+  filters: TicketFetchFilters,
   caches: TicketFetchCaches,
   onProgress: (progress: FetchProgress) => void,
   options: FreshdeskFetchOptions = {},
 ): Promise<FetchAllTicketsResult> {
-  validateDateRange(from, to)
+  validateFetchFilters(filters)
 
   const { fetchOptions, report } = createProgressReporter(onProgress, options)
-  const preview = await previewTicketSearch(from, to, caches, fetchOptions)
-  const { total, totalPages } = preview
+  const { total, totalPages } = await ensureSearchPreview(filters, caches, fetchOptions)
 
-  const allRawTickets: Ticket[] = []
-
-  for (let page = 1; page <= totalPages; page += 1) {
-    report({
-      fetched: allRawTickets.length,
-      total,
-      page,
-      totalPages,
-      phase: 'tickets',
-      status: 'fetching',
-      message: `Loading page ${page} of ${totalPages}…`,
-    })
-    const pageTickets = await getSearchPageTickets(from, to, page, caches, fetchOptions)
-    allRawTickets.push(...pageTickets)
-  }
-
-  const { tickets, userNames } = await enrichTickets(
-    allRawTickets,
+  const allRawTickets = await loadAllSearchPageTickets(
+    filters,
     caches,
     fetchOptions,
     report,
-    { page: totalPages, totalPages, total },
+    total,
+    totalPages,
+  )
+
+  const filteredRaw =
+    filters.keywords.length > 0
+      ? allRawTickets.filter((ticket) =>
+          textsMatchKeywords(
+            [ticket.subject, getTicketDescription(ticket)],
+            filters.keywords,
+          ),
+        )
+      : allRawTickets
+
+  const { tickets, userNames } = await enrichTickets(
+    filteredRaw,
+    caches,
+    fetchOptions,
+    report,
+    { page: totalPages, totalPages, total: filteredRaw.length },
   )
 
   return { tickets, userNames }
@@ -585,6 +772,51 @@ export async function fetchAppConfig(): Promise<{ domain: string }> {
       0,
     )
   }
+}
+
+interface TicketFieldChoice {
+  value?: string
+  label?: string
+}
+
+interface TicketField {
+  name?: string
+  type?: string
+  choices?: Array<string | TicketFieldChoice>
+}
+
+function parseTicketFieldChoices(choices: TicketField['choices']): string[] {
+  if (!choices || !Array.isArray(choices)) return []
+
+  return choices
+    .map((choice) => {
+      if (typeof choice === 'string') return choice.trim()
+      return (choice.value ?? choice.label ?? '').trim()
+    })
+    .filter((choice) => choice.length > 0)
+}
+
+async function fetchTagsFromTicketFields(
+  options: FreshdeskFetchOptions = {},
+): Promise<string[]> {
+  const { data } = await freshdeskFetch<TicketField[]>('/api/v2/ticket_fields', options)
+  if (!Array.isArray(data)) return []
+
+  const tagField = data.find(
+    (field) => field.name === 'tags' || field.type === 'default_tag',
+  )
+  return parseTicketFieldChoices(tagField?.choices)
+}
+
+export async function fetchFreshdeskTags(
+  options: FreshdeskFetchOptions = {},
+): Promise<string[]> {
+  const tags = await fetchTagsFromTicketFields(options)
+  if (tags.length === 0) return []
+
+  return [...new Set(tags)].sort((a, b) =>
+    a.localeCompare(b, undefined, { sensitivity: 'base' }),
+  )
 }
 
 export async function fetchTicketConversations(

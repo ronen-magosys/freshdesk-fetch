@@ -9,7 +9,7 @@ import {
   ticketUrl,
 } from '../api/freshdesk'
 import type { Conversation, EnrichedTicket } from '../api/types'
-import { EXPORT_KEYWORDS_LABEL } from './exportSanitize'
+import { buildKeywordsLabel } from './filters'
 
 function formatConversationSection(
   ticket: EnrichedTicket,
@@ -47,9 +47,11 @@ export function buildTicketsMarkdown(
   domain: string,
   conversationsByTicketId: Map<number, Conversation[]>,
   userNames: Map<number, string>,
+  keywords: string[],
 ): string {
+  const label = buildKeywordsLabel(keywords)
   const lines: string[] = [
-    `# Tickets created ${from} to ${to} (${tickets.length} matching ${EXPORT_KEYWORDS_LABEL})`,
+    `# Tickets created ${from} to ${to} (${tickets.length} matching ${label})`,
     '',
   ]
 
