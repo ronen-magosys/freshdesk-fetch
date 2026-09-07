@@ -807,10 +807,17 @@ function scrollPanelIntoView(panel: HTMLElement): void {
   panel.scrollIntoView({ behavior, block: 'start' })
 }
 
-function pageRangeLabel(currentPage: number, totalTickets: number): string {
+function pageRangeLabel(
+  currentPage: number,
+  totalTickets: number,
+  searchTotal?: number,
+): string {
   if (totalTickets === 0) return 'No tickets loaded'
   const start = (currentPage - 1) * UI_PAGE_SIZE + 1
   const end = Math.min(currentPage * UI_PAGE_SIZE, totalTickets)
+  if (searchTotal !== undefined && searchTotal > totalTickets) {
+    return `${start}–${end} of ${totalTickets} matches (${searchTotal} loaded)`
+  }
   return `${start}–${end} of ${totalTickets}`
 }
 
@@ -1184,6 +1191,7 @@ function App() {
   const [tickets, setTickets] = useState<EnrichedTicket[]>([])
   const [currentPage, setCurrentPage] = useState(1)
   const [totalTickets, setTotalTickets] = useState(0)
+  const [searchTotal, setSearchTotal] = useState(0)
   const [totalPages, setTotalPages] = useState(0)
   const [userNames, setUserNames] = useState<Map<number, string>>(new Map())
   const [conversationsCache, setConversationsCache] = useState<Map<number, Conversation[]>>(
@@ -1345,6 +1353,7 @@ function App() {
         )
         setTickets(result.tickets)
         setTotalTickets(result.total)
+        setSearchTotal(result.searchTotal)
         setTotalPages(result.totalPages)
         setCurrentPage(page)
         setUserNames(result.userNames)
@@ -1377,11 +1386,11 @@ function App() {
 
       if (previewTotal > WARN_TICKETS) {
         const message = hasKeywords
-          ? `This range has ${previewTotal} tickets (${previewTotalPages} pages). Keywords require loading all ${previewTotalPages} pages before filtering. Continue?`
+          ? `This range has ${previewTotal} tickets (${previewTotalPages} pages) to download so keywords can be applied. The table will only show matching tickets, with pagination based on that smaller set. Continue?`
           : `This range has ${previewTotal} tickets (${previewTotalPages} pages). Only the first ${UI_PAGE_SIZE} will load now.`
 
         setConfirm({
-          title: 'Large result set',
+          title: hasKeywords ? 'Large fetch' : 'Large result set',
           message,
           onConfirm: () => {
             setConfirm(null)
@@ -1416,6 +1425,7 @@ function App() {
     setProgress(null)
     setTickets([])
     setTotalTickets(0)
+    setSearchTotal(0)
     setTotalPages(0)
     setCurrentPage(1)
     setUserNames(new Map())
@@ -1781,7 +1791,7 @@ function App() {
           <PanelHeader>
             <strong>
               {hasLoadedTickets
-                ? pageRangeLabel(currentPage, totalTickets)
+                ? pageRangeLabel(currentPage, totalTickets, searchTotal)
                 : 'No tickets loaded'}
             </strong>
             {hasLoadedTickets ? (

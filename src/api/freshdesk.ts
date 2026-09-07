@@ -77,6 +77,7 @@ export interface FetchTicketPageResult {
   tickets: EnrichedTicket[]
   total: number
   totalPages: number
+  searchTotal: number
   userNames: Map<number, string>
 }
 
@@ -378,6 +379,24 @@ async function getSearchPageTickets(
   return pageData.results
 }
 
+function ticketMatchesKeywords(ticket: Ticket, keywords: string[]): boolean {
+  return textsMatchKeywords(
+    [ticket.subject, getTicketDescription(ticket)],
+    keywords,
+  )
+}
+
+function keywordDownloadProgressMessage(
+  page: number,
+  apiTotalPages: number,
+  loaded: number,
+  apiTotal: number,
+  matchCount: number,
+): string {
+  const base = `Downloading page ${page} of ${apiTotalPages} (${loaded} of ${apiTotal}) to apply keyword filters…`
+  return matchCount > 0 ? `${base} ${matchCount} matches so far` : base
+}
+
 async function loadAllSearchPageTickets(
   filters: TicketFetchFilters,
   caches: TicketFetchCaches,
@@ -385,21 +404,63 @@ async function loadAllSearchPageTickets(
   onProgress: (progress: FetchProgress) => void,
   apiTotal: number,
   apiTotalPages: number,
+  keywords?: string[],
 ): Promise<Ticket[]> {
   const allRawTickets: Ticket[] = []
+  let matchCount = 0
 
   for (let page = 1; page <= apiTotalPages; page += 1) {
-    onProgress({
-      fetched: allRawTickets.length,
-      total: apiTotal,
-      page,
-      totalPages: apiTotalPages,
-      phase: 'tickets',
-      status: 'fetching',
-      message: `Loading page ${page} of ${apiTotalPages}…`,
-    })
+    if (keywords) {
+      onProgress({
+        fetched: allRawTickets.length,
+        total: apiTotal,
+        page,
+        totalPages: apiTotalPages,
+        phase: 'tickets',
+        status: 'fetching',
+        message: keywordDownloadProgressMessage(
+          page,
+          apiTotalPages,
+          allRawTickets.length,
+          apiTotal,
+          matchCount,
+        ),
+      })
+    } else {
+      onProgress({
+        fetched: allRawTickets.length,
+        total: apiTotal,
+        page,
+        totalPages: apiTotalPages,
+        phase: 'tickets',
+        status: 'fetching',
+        message: `Loading page ${page} of ${apiTotalPages}…`,
+      })
+    }
+
     const pageTickets = await getSearchPageTickets(filters, page, caches, options)
     allRawTickets.push(...pageTickets)
+
+    if (keywords) {
+      matchCount += pageTickets.filter((ticket) =>
+        ticketMatchesKeywords(ticket, keywords),
+      ).length
+      onProgress({
+        fetched: allRawTickets.length,
+        total: apiTotal,
+        page,
+        totalPages: apiTotalPages,
+        phase: 'tickets',
+        status: 'fetching',
+        message: keywordDownloadProgressMessage(
+          page,
+          apiTotalPages,
+          allRawTickets.length,
+          apiTotal,
+          matchCount,
+        ),
+      })
+    }
   }
 
   return allRawTickets
@@ -616,10 +677,12 @@ async function fetchFilteredTicketPage(
 
     const start = (page - 1) * UI_PAGE_SIZE
     const tickets = caches.filteredTickets.slice(start, start + UI_PAGE_SIZE)
+    const searchTotal = caches.searchTotal ?? total
     return {
       tickets,
       total,
       totalPages,
+      searchTotal,
       userNames: caches.filteredUserNames,
     }
   }
@@ -637,7 +700,7 @@ async function fetchFilteredTicketPage(
     totalPages: apiTotalPages,
     phase: 'tickets',
     status: 'fetching',
-    message: `Loading all ${apiTotalPages} pages to apply keyword filter…`,
+    message: keywordDownloadProgressMessage(1, apiTotalPages, 0, apiTotal, 0),
   })
 
   const allRawTickets = await loadAllSearchPageTickets(
@@ -647,14 +710,22 @@ async function fetchFilteredTicketPage(
     report,
     apiTotal,
     apiTotalPages,
+    filters.keywords,
   )
 
   const filteredRaw = allRawTickets.filter((ticket) =>
-    textsMatchKeywords(
-      [ticket.subject, getTicketDescription(ticket)],
-      filters.keywords,
-    ),
+    ticketMatchesKeywords(ticket, filters.keywords),
   )
+
+  report({
+    fetched: filteredRaw.length,
+    total: filteredRaw.length,
+    page: 1,
+    totalPages: computeLocalTotalPages(filteredRaw.length),
+    phase: 'tickets',
+    status: 'fetching',
+    message: `${filteredRaw.length} tickets matched keywords (of ${allRawTickets.length} loaded)`,
+  })
 
   const totalPages = computeLocalTotalPages(filteredRaw.length)
   const { tickets, userNames } = await enrichTickets(
@@ -686,6 +757,7 @@ async function fetchFilteredTicketPage(
     tickets: tickets.slice(start, start + UI_PAGE_SIZE),
     total: tickets.length,
     totalPages,
+    searchTotal: apiTotal,
     userNames,
   }
 }
@@ -733,7 +805,7 @@ export async function fetchTicketPage(
     { page, totalPages, total },
   )
 
-  return { tickets, total, totalPages, userNames }
+  return { tickets, total, totalPages, searchTotal: total, userNames }
 }
 
 export async function fetchAllTicketsInRange(
