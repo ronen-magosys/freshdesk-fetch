@@ -34,7 +34,7 @@ The API key is injected by the Vite dev proxy and is never sent to the browser. 
 2. **Click Fetch tickets** — loads matching tickets from Freshdesk.
 3. **Open Filters** (filter icon) to refine results:
    - **Status** — defaults to Closed; supports Open, Pending, Resolved, Closed, Waiting on Customer, Waiting on Third Party
-   - **Tags** — loaded from your Freshdesk ticket fields
+   - **Tags** — type tag names and press Enter to filter by Freshdesk ticket tags
    - **Keywords** — defaults to `sdk`, `api`, `integration`; matches whole words in subject and description
 4. **Browse the table** — 30 tickets per page with requester, agent, status, priority, created, and due dates. Use the search box to filter the current page locally.
 5. **Click a row** — opens a dialog with the full conversation thread (opening message, replies, and private notes).

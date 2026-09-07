@@ -6,7 +6,6 @@ import {
   defaultDateRange,
   fetchAllTicketsInRange,
   fetchAppConfig,
-  fetchFreshdeskTags,
   fetchTicketConversations,
   fetchTicketPage,
   formatUtcDateTime,
@@ -899,9 +898,6 @@ interface FiltersDialogState {
   onSelectedTagsChange: (tags: string[]) => void
   keywords: string[]
   onKeywordsChange: (keywords: string[]) => void
-  availableTags: string[]
-  tagsLoading: boolean
-  tagsUnavailable: boolean
   disabled: boolean
   onClose: () => void
 }
@@ -913,9 +909,6 @@ function FiltersDialog({
   onSelectedTagsChange,
   keywords,
   onKeywordsChange,
-  availableTags,
-  tagsLoading,
-  tagsUnavailable,
   disabled,
   onClose,
 }: FiltersDialogState) {
@@ -965,11 +958,9 @@ function FiltersDialog({
             <ChipSelect
               values={selectedTags}
               onChange={onSelectedTagsChange}
-              options={availableTags}
-              allowCustom={false}
-              placeholder={tagsUnavailable ? 'No tags found' : 'Select tags'}
-              disabled={disabled || tagsUnavailable}
-              loading={tagsLoading}
+              allowCustom
+              placeholder="Type tag and press Enter"
+              disabled={disabled}
             />
           </FiltersField>
           <FiltersField>
@@ -1184,8 +1175,6 @@ function App() {
   const [selectedTags, setSelectedTags] = useState<string[]>([])
   const [selectedStatuses, setSelectedStatuses] = useState<string[]>(['Closed'])
   const [keywords, setKeywords] = useState<string[]>([...DEFAULT_KEYWORDS])
-  const [availableTags, setAvailableTags] = useState<string[]>([])
-  const [tagsLoading, setTagsLoading] = useState(false)
   const [hasFetched, setHasFetched] = useState(false)
   const [domain, setDomain] = useState('')
   const [tickets, setTickets] = useState<EnrichedTicket[]>([])
@@ -1229,24 +1218,6 @@ function App() {
         setError(message)
       })
   }, [])
-
-  const loadAvailableTags = useCallback(() => {
-    setTagsLoading(true)
-
-    void fetchFreshdeskTags()
-      .then((tags) => {
-        setAvailableTags(tags)
-        setTagsLoading(false)
-      })
-      .catch(() => {
-        setAvailableTags([])
-        setTagsLoading(false)
-      })
-  }, [])
-
-  useEffect(() => {
-    loadAvailableTags()
-  }, [loadAvailableTags])
 
   const filteredTickets = useMemo(() => {
     const query = search.trim().toLowerCase()
@@ -1678,7 +1649,6 @@ function App() {
       : tickets.length === 0
         ? 'No tickets to download. Fetch tickets first.'
         : undefined
-  const tagsUnavailable = !tagsLoading && availableTags.length === 0
   const activeFilterCount = selectedStatuses.length + selectedTags.length + keywords.length
   const hasLoadedTickets = totalTickets > 0
   const showTableLoading = loading && !downloading && tickets.length > 0
@@ -1956,9 +1926,6 @@ function App() {
           onSelectedTagsChange={setSelectedTags}
           keywords={keywords}
           onKeywordsChange={setKeywords}
-          availableTags={availableTags}
-          tagsLoading={tagsLoading}
-          tagsUnavailable={tagsUnavailable}
           disabled={isBusy}
           onClose={() => setFiltersOpen(false)}
         />

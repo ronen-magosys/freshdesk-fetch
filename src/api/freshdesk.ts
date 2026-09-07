@@ -865,51 +865,6 @@ export async function fetchAppConfig(): Promise<{ domain: string }> {
   }
 }
 
-interface TicketFieldChoice {
-  value?: string
-  label?: string
-}
-
-interface TicketField {
-  name?: string
-  type?: string
-  choices?: Array<string | TicketFieldChoice>
-}
-
-function parseTicketFieldChoices(choices: TicketField['choices']): string[] {
-  if (!choices || !Array.isArray(choices)) return []
-
-  return choices
-    .map((choice) => {
-      if (typeof choice === 'string') return choice.trim()
-      return (choice.value ?? choice.label ?? '').trim()
-    })
-    .filter((choice) => choice.length > 0)
-}
-
-async function fetchTagsFromTicketFields(
-  options: FreshdeskFetchOptions = {},
-): Promise<string[]> {
-  const { data } = await freshdeskFetch<TicketField[]>('/api/v2/ticket_fields', options)
-  if (!Array.isArray(data)) return []
-
-  const tagField = data.find(
-    (field) => field.name === 'tags' || field.type === 'default_tag',
-  )
-  return parseTicketFieldChoices(tagField?.choices)
-}
-
-export async function fetchFreshdeskTags(
-  options: FreshdeskFetchOptions = {},
-): Promise<string[]> {
-  const tags = await fetchTagsFromTicketFields(options)
-  if (tags.length === 0) return []
-
-  return [...new Set(tags)].sort((a, b) =>
-    a.localeCompare(b, undefined, { sensitivity: 'base' }),
-  )
-}
-
 export async function fetchTicketConversations(
   ticketId: number,
   options: FreshdeskFetchOptions = {},
