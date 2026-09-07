@@ -38,8 +38,18 @@ import {
   buildNoMatchesMarkdown,
   prepareExportForDownload,
 } from './utils/exportSanitize'
-import { buildTicketsMarkdown, downloadMarkdown } from './utils/markdown'
+import {
+  buildTicketsMarkdown,
+  collapseConsecutiveBlankLines,
+  downloadMarkdown,
+} from './utils/markdown'
 import { DEFAULT_KEYWORDS } from './utils/filters'
+
+const STATUS_OPTIONS = Object.values(STATUS_LABELS)
+
+const STATUS_LABEL_TO_NUMBER = new Map(
+  Object.entries(STATUS_LABELS).map(([status, label]) => [label, Number(status)]),
+)
 
 const GlobalStyle = styled.div`
   min-height: 100vh;
@@ -152,6 +162,76 @@ const TooltipWrap = styled.span`
     opacity: 1;
     visibility: visible;
   }
+`
+
+const ToolbarActionsEnd = styled.div`
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+`
+
+const IconButtonWrap = styled.span`
+  position: relative;
+  display: inline-flex;
+`
+
+const IconButton = styled.button<{ $variant?: 'primary' | 'secondary' }>`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+
+  ${({ $variant = 'secondary' }) =>
+    $variant === 'primary'
+      ? css`
+          border: none;
+          background: #2c5cc5;
+          color: #fff;
+          &:hover:not(:disabled) {
+            background: #244ea3;
+          }
+        `
+      : css`
+          border: 1px solid #2c5cc5;
+          background: #fff;
+          color: #2c5cc5;
+          &:hover:not(:disabled) {
+            background: #ebf0fb;
+          }
+        `}
+
+  &:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  &:focus-visible {
+    outline: 2px solid #2c5cc5;
+    outline-offset: 1px;
+  }
+`
+
+const FilterBadge = styled.span`
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #2c5cc5;
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  pointer-events: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
 `
 
 const TooltipBubble = styled.span`
@@ -302,6 +382,15 @@ const TableSpinner = styled.div`
   animation: ${spin} 0.7s linear infinite;
 `
 
+const IconSpinner = styled.div`
+  width: 18px;
+  height: 18px;
+  border: 2px solid #e8ecf0;
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: ${spin} 0.7s linear infinite;
+`
+
 const TableLoadingText = styled.span`
   font-size: 0.9rem;
   color: #475867;
@@ -417,6 +506,28 @@ const DialogPanel = styled.div`
 
 const ConfirmPanel = styled(DialogPanel)`
   max-width: 480px;
+`
+
+const FiltersPanel = styled(DialogPanel)`
+  max-width: 560px;
+  overflow: visible;
+`
+
+const FiltersBody = styled.div`
+  padding: 16px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: visible;
+`
+
+const FiltersField = styled.label`
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #475867;
 `
 
 const DialogHeader = styled.div`
@@ -607,6 +718,44 @@ function ExternalLinkIcon() {
   )
 }
 
+function FilterIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+    </svg>
+  )
+}
+
+function DownloadIcon() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  )
+}
+
 function statusBadge(status: number) {
   switch (status) {
     case 2:
@@ -665,17 +814,25 @@ function pageRangeLabel(currentPage: number, totalTickets: number): string {
   return `${start}–${end} of ${totalTickets}`
 }
 
+function statusLabelsToNumbers(labels: string[]): number[] {
+  return labels
+    .map((label) => STATUS_LABEL_TO_NUMBER.get(label))
+    .filter((status): status is number => status !== undefined)
+}
+
 function buildTicketFetchFilters(
   from: string,
   to: string,
   tags: string[],
   keywords: string[],
+  statusLabels: string[],
 ): TicketFetchFilters {
   return {
     from,
     to,
     tags,
     keywords,
+    statuses: statusLabelsToNumbers(statusLabels),
   }
 }
 
@@ -724,6 +881,105 @@ function ConfirmDialog({
           </Button>
         </ConfirmActions>
       </ConfirmPanel>
+    </DialogOverlay>
+  )
+}
+
+interface FiltersDialogState {
+  selectedStatuses: string[]
+  onSelectedStatusesChange: (statuses: string[]) => void
+  selectedTags: string[]
+  onSelectedTagsChange: (tags: string[]) => void
+  keywords: string[]
+  onKeywordsChange: (keywords: string[]) => void
+  availableTags: string[]
+  tagsLoading: boolean
+  tagsUnavailable: boolean
+  disabled: boolean
+  onClose: () => void
+}
+
+function FiltersDialog({
+  selectedStatuses,
+  onSelectedStatusesChange,
+  selectedTags,
+  onSelectedTagsChange,
+  keywords,
+  onKeywordsChange,
+  availableTags,
+  tagsLoading,
+  tagsUnavailable,
+  disabled,
+  onClose,
+}: FiltersDialogState) {
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+      document.body.style.overflow = previousOverflow
+    }
+  }, [onClose])
+
+  return (
+    <DialogOverlay onClick={onClose} role="presentation">
+      <FiltersPanel
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="filters-dialog-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <DialogHeader>
+          <DialogHeaderContent>
+            <DialogTitle id="filters-dialog-title">Filters</DialogTitle>
+          </DialogHeaderContent>
+          <DialogCloseButton type="button" onClick={onClose} aria-label="Close dialog">
+            ×
+          </DialogCloseButton>
+        </DialogHeader>
+        <FiltersBody>
+          <FiltersField>
+            Status
+            <ChipSelect
+              values={selectedStatuses}
+              onChange={onSelectedStatusesChange}
+              options={STATUS_OPTIONS}
+              allowCustom={false}
+              placeholder="Select statuses"
+              disabled={disabled}
+            />
+          </FiltersField>
+          <FiltersField>
+            Tags
+            <ChipSelect
+              values={selectedTags}
+              onChange={onSelectedTagsChange}
+              options={availableTags}
+              allowCustom={false}
+              placeholder={tagsUnavailable ? 'No tags found' : 'Select tags'}
+              disabled={disabled || tagsUnavailable}
+              loading={tagsLoading}
+            />
+          </FiltersField>
+          <FiltersField>
+            Keywords
+            <ChipSelect
+              values={keywords}
+              onChange={onKeywordsChange}
+              allowCustom
+              placeholder="Type keyword and press Enter"
+              disabled={disabled}
+            />
+          </FiltersField>
+        </FiltersBody>
+        <ConfirmActions>
+          <Button type="button" onClick={onClose}>Done</Button>
+        </ConfirmActions>
+      </FiltersPanel>
     </DialogOverlay>
   )
 }
@@ -875,7 +1131,8 @@ function TicketDialog({
                   </ConversationTimestamp>
                 </ConversationHeader>
                 <ConversationBody>
-                  {getTicketDescription(ticket) || 'No description.'}
+                  {collapseConsecutiveBlankLines(getTicketDescription(ticket)) ||
+                    'No description.'}
                 </ConversationBody>
               </ConversationMessage>
 
@@ -899,7 +1156,8 @@ function TicketDialog({
                       </ConversationTimestamp>
                     </ConversationHeader>
                     <ConversationBody>
-                      {getConversationBody(conversation) || '(Empty message.)'}
+                      {collapseConsecutiveBlankLines(getConversationBody(conversation)) ||
+                        '(Empty message.)'}
                     </ConversationBody>
                   </ConversationMessage>
                 )
@@ -917,6 +1175,7 @@ function App() {
   const [fromDate, setFromDate] = useState(defaults.from)
   const [toDate, setToDate] = useState(defaults.to)
   const [selectedTags, setSelectedTags] = useState<string[]>([])
+  const [selectedStatuses, setSelectedStatuses] = useState<string[]>(['Closed'])
   const [keywords, setKeywords] = useState<string[]>([...DEFAULT_KEYWORDS])
   const [availableTags, setAvailableTags] = useState<string[]>([])
   const [tagsLoading, setTagsLoading] = useState(false)
@@ -941,6 +1200,7 @@ function App() {
   const [exportSuccess, setExportSuccess] = useState<string | null>(null)
   const [confirm, setConfirm] = useState<ConfirmState | null>(null)
   const [downloadChoice, setDownloadChoice] = useState<DownloadChoiceState | null>(null)
+  const [filtersOpen, setFiltersOpen] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const conversationAbortRef = useRef<AbortController | null>(null)
   const conversationsCacheRef = useRef(conversationsCache)
@@ -1059,7 +1319,13 @@ function App() {
       const controller = new AbortController()
       abortRef.current = controller
 
-      const filters = buildTicketFetchFilters(fromDate, toDate, selectedTags, keywords)
+      const filters = buildTicketFetchFilters(
+        fromDate,
+        toDate,
+        selectedTags,
+        keywords,
+        selectedStatuses,
+      )
 
       setLoading(true)
       setError(null)
@@ -1098,7 +1364,7 @@ function App() {
         setLoading(false)
       }
     },
-    [fromDate, keywords, selectedTags, toDate],
+    [fromDate, keywords, selectedStatuses, selectedTags, toDate],
   )
 
   const startFetchAfterPreview = useCallback(
@@ -1136,7 +1402,13 @@ function App() {
     const controller = new AbortController()
     abortRef.current = controller
 
-    const filters = buildTicketFetchFilters(fromDate, toDate, selectedTags, keywords)
+    const filters = buildTicketFetchFilters(
+      fromDate,
+      toDate,
+      selectedTags,
+      keywords,
+      selectedStatuses,
+    )
 
     setLoading(true)
     setError(null)
@@ -1171,13 +1443,19 @@ function App() {
       setError(message)
       setLoading(false)
     }
-  }, [fromDate, keywords, startFetchAfterPreview, selectedTags, toDate])
+  }, [fromDate, keywords, startFetchAfterPreview, selectedStatuses, selectedTags, toDate])
 
   const handleFetch = useCallback(() => {
     setError(null)
     setExportSuccess(null)
 
-    const filters = buildTicketFetchFilters(fromDate, toDate, selectedTags, keywords)
+    const filters = buildTicketFetchFilters(
+      fromDate,
+      toDate,
+      selectedTags,
+      keywords,
+      selectedStatuses,
+    )
 
     try {
       validateFetchFilters(filters)
@@ -1207,7 +1485,7 @@ function App() {
     }
 
     void runFetchWithPreview()
-  }, [fromDate, keywords, runFetchWithPreview, selectedTags, toDate])
+  }, [fromDate, keywords, runFetchWithPreview, selectedStatuses, selectedTags, toDate])
 
   const fetchConversationsForTickets = useCallback(
     async (
@@ -1240,7 +1518,13 @@ function App() {
     async (scope: 'page' | 'range') => {
       if (!domain) return
 
-      const filters = buildTicketFetchFilters(fromDate, toDate, selectedTags, keywords)
+      const filters = buildTicketFetchFilters(
+        fromDate,
+        toDate,
+        selectedTags,
+        keywords,
+        selectedStatuses,
+      )
       const exportKeywords = filters.keywords
 
       setDownloading(true)
@@ -1348,6 +1632,7 @@ function App() {
       fetchConversationsForTickets,
       fromDate,
       keywords,
+      selectedStatuses,
       selectedTags,
       tickets,
       toDate,
@@ -1384,6 +1669,7 @@ function App() {
         ? 'No tickets to download. Fetch tickets first.'
         : undefined
   const tagsUnavailable = !tagsLoading && availableTags.length === 0
+  const activeFilterCount = selectedStatuses.length + selectedTags.length + keywords.length
   const hasLoadedTickets = totalTickets > 0
   const showTableLoading = loading && !downloading && tickets.length > 0
 
@@ -1451,49 +1737,42 @@ function App() {
               disabled={isBusy}
             />
           </Field>
-          <Field>
-            Tags
-            <ChipSelect
-              values={selectedTags}
-              onChange={setSelectedTags}
-              options={availableTags}
-              allowCustom={false}
-              placeholder={tagsUnavailable ? 'No tags found' : 'Select tags'}
-              disabled={isBusy || tagsUnavailable}
-              loading={tagsLoading}
-            />
-          </Field>
-          <Field>
-            Keywords
-            <ChipSelect
-              values={keywords}
-              onChange={setKeywords}
-              allowCustom
-              placeholder="Type keyword and press Enter"
-              disabled={isBusy}
-            />
-          </Field>
           <Button type="button" onClick={handleFetch} disabled={isBusy || !domain}>
             {loading ? 'Fetching…' : 'Fetch tickets'}
           </Button>
-          <TooltipWrap>
-            <Button
+          <IconButtonWrap>
+            <IconButton
               type="button"
-              $variant="secondary"
-              onClick={handleDownloadClick}
-              disabled={Boolean(downloadDisabledReason)}
-              aria-describedby={
-                downloadDisabledReason ? 'download-markdown-tooltip' : undefined
-              }
+              onClick={() => setFiltersOpen(true)}
+              aria-label="Filters"
             >
-              {downloading ? 'Preparing download…' : 'Download tickets'}
-            </Button>
-            {downloadDisabledReason ? (
-              <TooltipBubble id="download-markdown-tooltip" role="tooltip" data-tooltip-bubble>
-                {downloadDisabledReason}
-              </TooltipBubble>
+              <FilterIcon />
+            </IconButton>
+            {activeFilterCount > 0 ? (
+              <FilterBadge aria-hidden="true">{activeFilterCount}</FilterBadge>
             ) : null}
-          </TooltipWrap>
+          </IconButtonWrap>
+          <ToolbarActionsEnd>
+            <TooltipWrap>
+              <IconButton
+                type="button"
+                onClick={handleDownloadClick}
+                disabled={Boolean(downloadDisabledReason)}
+                aria-label="Download tickets"
+                aria-busy={downloading}
+                aria-describedby={
+                  downloadDisabledReason ? 'download-markdown-tooltip' : undefined
+                }
+              >
+                {downloading ? <IconSpinner aria-hidden="true" /> : <DownloadIcon />}
+              </IconButton>
+              {downloadDisabledReason ? (
+                <TooltipBubble id="download-markdown-tooltip" role="tooltip" data-tooltip-bubble>
+                  {downloadDisabledReason}
+                </TooltipBubble>
+              ) : null}
+            </TooltipWrap>
+          </ToolbarActionsEnd>
         </Toolbar>
 
         {statusText ? <StatusBar $tone={statusTone}>{statusText}</StatusBar> : null}
@@ -1659,6 +1938,21 @@ function App() {
 
       {confirm ? <ConfirmDialog {...confirm} /> : null}
       {downloadChoice ? <DownloadChoiceDialog {...downloadChoice} /> : null}
+      {filtersOpen ? (
+        <FiltersDialog
+          selectedStatuses={selectedStatuses}
+          onSelectedStatusesChange={setSelectedStatuses}
+          selectedTags={selectedTags}
+          onSelectedTagsChange={setSelectedTags}
+          keywords={keywords}
+          onKeywordsChange={setKeywords}
+          availableTags={availableTags}
+          tagsLoading={tagsLoading}
+          tagsUnavailable={tagsUnavailable}
+          disabled={isBusy}
+          onClose={() => setFiltersOpen(false)}
+        />
+      ) : null}
     </GlobalStyle>
   )
 }

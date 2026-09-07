@@ -15,6 +15,7 @@ export interface TicketFetchFilters {
   to: string
   tags: string[]
   keywords: string[]
+  statuses: number[]
 }
 
 const MAX_SEARCH_QUERY_LENGTH = 512
@@ -263,11 +264,20 @@ function buildTagClause(tags: string[]): string {
   return `(${parts.join(' OR ')})`
 }
 
-function buildSearchQuery(from: string, to: string, tags: string[]): string {
+function buildStatusClause(statuses: number[]): string {
+  if (statuses.length === 0) return ''
+  if (statuses.length === 1) return `status:${statuses[0]}`
+  const parts = statuses.map((status) => `status:${status}`)
+  return `(${parts.join(' OR ')})`
+}
+
+function buildSearchQuery(from: string, to: string, tags: string[], statuses: number[]): string {
   const fromExclusive = dayBefore(from)
   let inner = `created_at:>'${fromExclusive}' AND created_at:<'${to}'`
   const tagClause = buildTagClause(tags)
   if (tagClause) inner += ` AND ${tagClause}`
+  const statusClause = buildStatusClause(statuses)
+  if (statusClause) inner += ` AND ${statusClause}`
   const query = `"${inner}"`
   if (query.length > MAX_SEARCH_QUERY_LENGTH) {
     throw new FreshdeskApiError(
@@ -285,8 +295,10 @@ function filtersMatch(a: TicketFetchFilters | null, b: TicketFetchFilters): bool
     a.to === b.to &&
     a.tags.length === b.tags.length &&
     a.keywords.length === b.keywords.length &&
+    a.statuses.length === b.statuses.length &&
     a.tags.every((tag, index) => tag === b.tags[index]) &&
-    a.keywords.every((keyword, index) => keyword === b.keywords[index])
+    a.keywords.every((keyword, index) => keyword === b.keywords[index]) &&
+    a.statuses.every((status, index) => status === b.statuses[index])
   )
 }
 
@@ -321,7 +333,7 @@ export function validateDateRange(from: string, to: string): void {
 
 export function validateFetchFilters(filters: TicketFetchFilters): void {
   validateDateRange(filters.from, filters.to)
-  buildSearchQuery(filters.from, filters.to, filters.tags)
+  buildSearchQuery(filters.from, filters.to, filters.tags, filters.statuses)
 }
 
 export function computeTotalPages(total: number): number {
@@ -342,7 +354,9 @@ async function searchTicketsPage(
   page: number,
   options: FreshdeskFetchOptions,
 ): Promise<SearchTicketsResponse> {
-  const query = encodeURIComponent(buildSearchQuery(filters.from, filters.to, filters.tags))
+  const query = encodeURIComponent(
+    buildSearchQuery(filters.from, filters.to, filters.tags, filters.statuses),
+  )
   const { data } = await freshdeskFetch<SearchTicketsResponse>(
     `/api/v2/search/tickets?query=${query}&page=${page}`,
     options,
@@ -653,7 +667,12 @@ async function fetchFilteredTicketPage(
 
   caches.filteredTickets = tickets
   caches.filteredUserNames = userNames
-  caches.filters = { ...filters, tags: [...filters.tags], keywords: [...filters.keywords] }
+  caches.filters = {
+    ...filters,
+    tags: [...filters.tags],
+    keywords: [...filters.keywords],
+    statuses: [...filters.statuses],
+  }
 
   if (page < 1 || page > totalPages) {
     throw new FreshdeskApiError(
